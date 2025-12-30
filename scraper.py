@@ -33,6 +33,8 @@ def parse_word_page(url):
     if not soup:
         return None
 
+    usage_marks = None
+
     data = {
         "url": url,
         "id": url.split('/')[-1],
@@ -65,19 +67,18 @@ def parse_word_page(url):
         content = sections[3]
 
         # Estrazione Marca d'uso
-        usage_tags = content.find_all('abbr')
+        usage_tags = content.css.select('.mu')
         if usage_tags:
-            usage_marks = [tag.get_text(strip=True) for tag in usage_tags]
+            usage_marks = list(dict.fromkeys([tag.get_text(strip=True) for tag in usage_tags]))
             data["usage_marks"] = ", ".join(usage_marks)
 
         # Estrazione Definizioni
         text_content = content.get_text("\n", strip=True)
-        for mark in usage_marks:
-            if text_content.startswith(mark):
-                text_content = text_content[len(mark):].strip()
-        # if data["usage_mark"] and text_content.startswith(data["usage_mark"]):
-        #     text_content = text_content[len(data["usage_mark"]):].strip()
-
+        if usage_marks is not None:
+            for mark in usage_marks:
+                if text_content.startswith(mark):
+                    text_content = text_content[len(mark):].strip()
+                    
         # Regex per identificare l'inizio delle definizioni numerate (es. "1. ", "5a. ")
         def_parts = re.split(r'(\d+[a-z]?\.\s)', text_content)
 
@@ -170,5 +171,5 @@ def scrape_dictionary(letters=None, output_file="dict_complete.jsonl", generate_
                 time.sleep(1) # Rispetto per il server (Rate Limiting)
 
 if __name__ == "__main__":
-    scrape_dictionary(letters=['z'], output_file="dict_z.jsonl")
+    scrape_dictionary(letters=['z'], output_file="dict_z.jsonl", generate_report=True, analysis= True)
     # scrape_dictionary()

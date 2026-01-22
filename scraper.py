@@ -1,21 +1,26 @@
-"""A scraper to collect data from a specific dictionary website."""
+"Web scraper to gather the most used italian words from an online dictionary."
 
-import re
-import time
 import json
-
+import time
+import re
+import itertools
+import string
+import os
 import requests
-from tabulate import tabulate
+
 from bs4 import BeautifulSoup
 
-
 BASE_URL = "https://dizionario.internazionale.it"
+SEARCH_URL = "https://dizionario.internazionale.it/cerca/"
 
+# Marche d'uso richieste: Fondamentale (FO), Alto Uso (AU), Alta Disponibilità (AD),
+# Comune (CO), Basso Uso (BU), Obsoleto (OB)
+ALLOWED_MARKS = {"FO", "AU", "AD", "CO", "BU", "OB"}
 
 def get_soup(url):
-    """Gather content HTML of an URL and returns a BeautifulSoup object."""
+    """Recupera il contenuto HTML di una URL e restituisce un oggetto BeautifulSoup."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -23,28 +28,24 @@ def get_soup(url):
         return BeautifulSoup(response.text, 'html.parser')
     except Exception as e:
         print(f"Error at {url}: {e}")
-        with open('scraping_errors_log.txt', 'a', encoding='utf-8') as l:
+        with open('V2_scraping_errors_log.txt', 'a', encoding='utf-8') as l:
             l.write(f"ERROR: {url} | {e}\n")
-
+        return None
 
 def parse_word_page(url):
-    """Extract the details of a word from its dedicated page."""
-
+    """Estrae i dettagli di una parola dalla sua pagina dedicata."""
     soup = get_soup(url)
     if not soup:
         return None
 
-    usage_marks = None
-
     data = {
         "url": url,
         "id": url.split('/')[-1],
-        "word": url.split('/')[-1].split('_')[0],
         "lemma": "",
         "display_lemma": "",
         "grammatical_category": "",
         "etymology": "",
-        "usage_marks": "",
+        "usage_marks": [],
         "definitions": []
     }
 
@@ -53,9 +54,13 @@ def parse_word_page(url):
         return None
 
     data["display_lemma"] = h1.get_text(strip=True)
-
-    # La struttura del sito utilizza tag <section> per i diversi blocchi di dati
     sections = h1.find_all_next('section')
+
+    if len(sections) < 1:
+        with open('polirematiche.txt', "a", encoding="utf-8") as log:
+            d = data["display_lemma"]
+            log.write(f"{d} | {url}\n")
+        return None
 
     if len(sections) >= 1:
         data["lemma"] = sections[0].get_text(strip=True)
@@ -69,10 +74,20 @@ def parse_word_page(url):
 
         # Estrazione Marca d'uso
         usage_tags = content.css.select('.mu')
-        if usage_tags:
-            usage_marks = list(dict.fromkeys([tag.get_text(strip=True) for tag in usage_tags]))
-            data["usage_marks"] = ", ".join(usage_marks)
+        print(usage_tags)
 
+        if usage_tags:
+            ts = []
+            for tag in usage_tags:
+                t = tag.get_text(strip=True)
+                ts.append(t)
+            usage_marks = list(dict.fromkeys(ts))
+            data["usage_marks"] = ", ".join(usage_marks)
+        else:
+            usage_marks = ["NOT_FOUND"]
+            data["usage_marks"] = usage_marks
+
+        print(usage_marks)
         # Estrazione Definizioni
         text_content = content.get_text("\n", strip=True)
         if usage_marks is not None:
@@ -80,12 +95,12 @@ def parse_word_page(url):
                 if text_content.startswith(mark):
                     text_content = text_content[len(mark):].strip()
 
-        # Regex per identificare l'inizio delle definizioni numerate (es. "1. ", "5a. ")
         def_parts = re.split(r'(\d+[a-z]?\.\s)', text_content)
-
         if len(def_parts) > 1:
             if def_parts[0].strip():
-                data["definitions"].append({"number": "0", "text": def_parts[0].strip().replace("\n", " ")})
+                data["definitions"].append(
+                        {"number": "0", "text": def_parts[0].strip().replace("\n", " ")}
+                    )
             for i in range(1, len(def_parts), 2):
                 num = def_parts[i].strip().replace(".", "")
                 text = def_parts[i+1].strip().replace("\n", " ")
@@ -95,94 +110,89 @@ def parse_word_page(url):
 
     return data
 
+def search_wildcard(query):
+    """Esegue una ricerca con wildcard e restituisce i link filtrati per marca d'uso."""
+    url = f"{SEARCH_URL}{query}"
+    soup = get_soup(url)
+    if not soup:
+        return []
 
-def get_word_links(letter, max_pages=None, source=None):
-    """Obtains all the links to the words for a specific letter, managing the pagination."""
-    links = []
-    page = 1
-    uppercase_letter = letter.upper()
+    results = []
+    # I risultati della ricerca sono link che contengono '/parola/'
+    all_links = soup.find_all('a', href=re.compile(r'/parola/'))
 
-    if source is not None:
-        links_list = []
-        with open(source, 'r', encoding='utf-8') as r:
-            lines = r.readlines()
-            for l in lines:
-                url = l.split("|")[-1].strip()
-                word = url.split('/')[-1]
-                if word.startswith(letter):
-                    links_list.append(url)
-            return links_list
+    for link_tag in all_links:
+        href = link_tag['href']
+        if not href.startswith('http'):
+            href = BASE_URL + href
 
-    else:
-        while True:
-            if max_pages and page > max_pages:
-                break
+        parent = link_tag.parent
+        context_text = parent.get_text() if parent else ""
 
-            url = f"{BASE_URL}/lettera/{letter}-{page}"
-            print(f"Scanning content of letter '{uppercase_letter}', pagina {page}...")
-            soup = get_soup(url)
+        # Estrai le marche d'uso dal contesto
+        found_marks = set(re.findall(r'\b(FO|AU|AD|CO|BU|OB)\b', context_text))
 
-            if not soup:
-                break
+        if found_marks.intersection(ALLOWED_MARKS):
+            results.append({
+                "lemma": link_tag.get_text(strip=True),
+                "url": href,
+                "marks": list(found_marks.intersection(ALLOWED_MARKS))
+            })
 
-            all_links = soup.find_all('a')
-            page_links = []
+    return results
 
-            for link in all_links:
-                href = link.get('href', '')
-                if '/parola/' in href:
-                    if not href.startswith('http'):
-                        href = BASE_URL + href
-                    if href not in page_links:
-                        page_links.append(href)
-                        print(href)
+def generate_combinations(length=3):
+    """Genera combinazioni di lettere (aaa, aab, aac, ...,zzx, zzy, zzz)."""
+    chars = string.ascii_lowercase
+    for combo in itertools.product(chars, repeat=length):
+        yield "".join(combo)
 
-            if not page_links:
-                break
+def main():
+    """Main function to execute the web scraper"""
+    output_file = "COMPLETE_DICTIONARY.jsonl"
+    processed_urls = set()
 
-            links.extend(page_links)
-            page += 1
-            print("page: ", page)
-            time.sleep(0.5) # Breve pausa tra le pagine
+    # Carica URL già processati se il file esiste
+    if os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    processed_urls.add(data['url'])
+                except:
+                    continue
 
-        return list(dict.fromkeys(links))
+    print("Inizio scraping...")
+    
+    # Iterazione da aaa* a zzz*
+    for combo in generate_combinations(3):
+        with open('scraping_log.txt', "a", encoding="utf-8") as log:
+            query = combo + "*"
+            str_1 = f"\n--- Elaborazione query: {query} ---"
+            log.write(str_1 + "\n")
+            print(str_1)
 
+            words_to_scrape = search_wildcard(query)
+            str_2 = f"Trovate {len(words_to_scrape)} parole corrispondenti ai criteri."
+            log.write(str_2 + "\n")
+            print(str_2)
 
-def scrape_dictionary(letters=None, output_file="dict_complete.jsonl",  source=None, generate_report=False, analysis=False):
-    """Main function for scraping the entire dictionary or specific letters."""
-    if not letters:
-        letters = [chr(i) for i in range(ord('a'), ord('z') + 1)]
+            for word_info in words_to_scrape:
+                if word_info['url'] in processed_urls:
+                    continue
 
-    print(f"Starting scraping for the letter: {', '.join(letters)}")
+                str_3 = f"Scraping: {word_info['marks']} | {word_info['lemma']} ({word_info['url']})"
+                log.write(str_3 + "\n")
+                print(str_3)
 
-    report_file_name = f"report_{output_file.split('.')[0].split('_')[-1]}"
-    report_haeders = ["Initial Letter", "Letter Index", "ID (link)", "Word"]
-    data = []
+                details = parse_word_page(word_info['url'])
+                if details:
+                    with open(output_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(details, ensure_ascii=False) + "\n")
+                    processed_urls.add(word_info['url'])
 
-    for letter in letters:
-        uppercase_letter = letter.upper()
-        word_links = get_word_links(letter, max_pages=None, source=source)
-        print(f"Found {len(word_links)} words for the letter '{uppercase_letter}'.")
-
-        for i, link in enumerate(word_links):
-            _id = link.split('/')[-1]
-            word = _id.split('_')[0]
-            line = [f"{uppercase_letter}", f"{i+1}/{len(word_links)}", f"{_id}", f"{word}"]
-            data.append(line)
-
-        if generate_report:
-            with open(report_file_name, 'a', encoding='utf-8') as r:
-                r.write(tabulate(data, headers=report_haeders, showindex="always", tablefmt="simple_outline"))
-
-        if analysis:
-            with open(output_file, 'a', encoding='utf-8') as f:
-                for i, link in enumerate(word_links):
-                    print(f"[{uppercase_letter}] Analysis {i+1}/{len(word_links)}: {link}")
-                    word_data = parse_word_page(link)
-                    if word_data:
-                        f.write(json.dumps(word_data, ensure_ascii=False) + "\n")
-                    time.sleep(1) # Rispetto per il server (Rate Limiting)
+                time.sleep(1) # Rispetto per il server
 
 if __name__ == "__main__":
-    scrape_dictionary(output_file="dict_completo.jsonl", source="report_completo" , generate_report=False, analysis=True)
-    # scrape_dictionary()
+    main()
+    # parse_word_page('https://dizionario.internazionale.it/parola/abito-nuziale')

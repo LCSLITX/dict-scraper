@@ -19,16 +19,17 @@ def get_soup(url):
     }
     try:
         response = requests.get(url, headers=headers, timeout=15)
-        print("URL: ", response.url)
         response.raise_for_status()
         return BeautifulSoup(response.text, 'html.parser')
     except Exception as e:
         print(f"Error at {url}: {e}")
-        return None
+        with open('scraping_errors_log.txt', 'a', encoding='utf-8') as l:
+            l.write(f"ERROR: {url} | {e}\n")
 
 
 def parse_word_page(url):
     """Extract the details of a word from its dedicated page."""
+
     soup = get_soup(url)
     if not soup:
         return None
@@ -78,7 +79,7 @@ def parse_word_page(url):
             for mark in usage_marks:
                 if text_content.startswith(mark):
                     text_content = text_content[len(mark):].strip()
-                    
+
         # Regex per identificare l'inizio delle definizioni numerate (es. "1. ", "5a. ")
         def_parts = re.split(r'(\d+[a-z]?\.\s)', text_content)
 
@@ -95,47 +96,59 @@ def parse_word_page(url):
     return data
 
 
-def get_word_links_from_letter(letter, max_pages=None):
+def get_word_links(letter, max_pages=None, source=None):
     """Obtains all the links to the words for a specific letter, managing the pagination."""
     links = []
     page = 1
     uppercase_letter = letter.upper()
 
-    while True:
-        if max_pages and page > max_pages:
-            break
+    if source is not None:
+        links_list = []
+        with open(source, 'r', encoding='utf-8') as r:
+            lines = r.readlines()
+            for l in lines:
+                url = l.split("|")[-1].strip()
+                word = url.split('/')[-1]
+                if word.startswith(letter):
+                    links_list.append(url)
+            return links_list
 
-        url = f"{BASE_URL}/lettera/{letter}-{page}"
-        print(f"Scanning content of letter '{uppercase_letter}', pagina {page}...")
-        soup = get_soup(url)
+    else:
+        while True:
+            if max_pages and page > max_pages:
+                break
 
-        if not soup:
-            break
+            url = f"{BASE_URL}/lettera/{letter}-{page}"
+            print(f"Scanning content of letter '{uppercase_letter}', pagina {page}...")
+            soup = get_soup(url)
 
-        all_links = soup.find_all('a')
-        page_links = []
+            if not soup:
+                break
 
-        for link in all_links:
-            href = link.get('href', '')
-            if '/parola/' in href:
-                if not href.startswith('http'):
-                    href = BASE_URL + href
-                if href not in page_links:
-                    page_links.append(href)
-                    print(href)
+            all_links = soup.find_all('a')
+            page_links = []
 
-        if not page_links:
-            break
+            for link in all_links:
+                href = link.get('href', '')
+                if '/parola/' in href:
+                    if not href.startswith('http'):
+                        href = BASE_URL + href
+                    if href not in page_links:
+                        page_links.append(href)
+                        print(href)
 
-        links.extend(page_links)
-        page += 1
-        print("page: ", page)
-        time.sleep(0.5) # Breve pausa tra le pagine dell'elenco
+            if not page_links:
+                break
 
-    return list(dict.fromkeys(links))
+            links.extend(page_links)
+            page += 1
+            print("page: ", page)
+            time.sleep(0.5) # Breve pausa tra le pagine
+
+        return list(dict.fromkeys(links))
 
 
-def scrape_dictionary(letters=None, output_file="dict_complete.jsonl", generate_report=False, analysis=False):
+def scrape_dictionary(letters=None, output_file="dict_complete.jsonl",  source=None, generate_report=False, analysis=False):
     """Main function for scraping the entire dictionary or specific letters."""
     if not letters:
         letters = [chr(i) for i in range(ord('a'), ord('z') + 1)]
@@ -148,7 +161,7 @@ def scrape_dictionary(letters=None, output_file="dict_complete.jsonl", generate_
 
     for letter in letters:
         uppercase_letter = letter.upper()
-        word_links = get_word_links_from_letter(letter, max_pages=None)
+        word_links = get_word_links(letter, max_pages=None, source=source)
         print(f"Found {len(word_links)} words for the letter '{uppercase_letter}'.")
 
         for i, link in enumerate(word_links):
@@ -157,19 +170,19 @@ def scrape_dictionary(letters=None, output_file="dict_complete.jsonl", generate_
             line = [f"{uppercase_letter}", f"{i+1}/{len(word_links)}", f"{_id}", f"{word}"]
             data.append(line)
 
-    if generate_report:
-        with open(report_file_name, 'a', encoding='utf-8') as r:
-            r.write(tabulate(data, headers=report_haeders, showindex="always", tablefmt="simple_outline"))
+        if generate_report:
+            with open(report_file_name, 'a', encoding='utf-8') as r:
+                r.write(tabulate(data, headers=report_haeders, showindex="always", tablefmt="simple_outline"))
 
-    if analysis:
-        with open(output_file, 'a', encoding='utf-8') as f:
-            for i, link in enumerate(word_links):
-                print(f"[{uppercase_letter}] Analysis {i+1}/{len(word_links)}: {link}")
-                word_data = parse_word_page(link)
-                if word_data:
-                    f.write(json.dumps(word_data, ensure_ascii=False) + "\n")
-                time.sleep(1) # Rispetto per il server (Rate Limiting)
+        if analysis:
+            with open(output_file, 'a', encoding='utf-8') as f:
+                for i, link in enumerate(word_links):
+                    print(f"[{uppercase_letter}] Analysis {i+1}/{len(word_links)}: {link}")
+                    word_data = parse_word_page(link)
+                    if word_data:
+                        f.write(json.dumps(word_data, ensure_ascii=False) + "\n")
+                    time.sleep(1) # Rispetto per il server (Rate Limiting)
 
 if __name__ == "__main__":
-    scrape_dictionary(letters=['z'], output_file="dict_z.jsonl", generate_report=True, analysis= True)
+    scrape_dictionary(output_file="dict_completo.jsonl", source="report_completo" , generate_report=False, analysis=True)
     # scrape_dictionary()
